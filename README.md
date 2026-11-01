@@ -37,8 +37,8 @@ defaults write me.diskun.kunyu language de                          # default: a
 
 List transcription models: `curl -s 'https://openrouter.ai/api/v1/models?output_modalities=transcription' | jq -r '.data[].id'`
 
-Note: this OpenRouter account enforces Zero Data Retention, which rules out OpenAI's `gpt-4o-*-transcribe` and Google's transcribe models.
-Verified working (2026-11-01): `elevenlabs/scribe-v2`, `openai/whisper-large-v3-turbo`, `deepgram/nova-3`,
+Note: if your OpenRouter account enforces Zero Data Retention (Settings → Privacy), OpenAI's `gpt-4o-*-transcribe` and Google's
+transcribe models are unavailable (HTTP 404 "ZDR violation"). The models in the menu work with ZDR on; verified 2026-11-01: `elevenlabs/scribe-v2`, `openai/whisper-large-v3-turbo`, `deepgram/nova-3`,
 `mistralai/voxtral-small-transcribe-3-0`, `assemblyai/universal-3-6-pro`, `nvidia/parakeet-tdt-0.6b-v3`.
 
 ## Files
