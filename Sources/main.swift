@@ -211,6 +211,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var state = State.idle { didSet { updateIcon() } }
     var lastError: String?
     var monitorsInstalled = false
+    var monitorsInstalledAtLaunch = false
 
     // Right-Option tap detection: fire on release if nothing else was pressed in between.
     var rightOptionDownAt: Date?
@@ -224,16 +225,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusItem.menu = menu
         updateIcon()
 
-        AVCaptureDevice.requestAccess(for: .audio) { _ in }
+        AVCaptureDevice.requestAccess(for: .audio) { _ in DispatchQueue.main.async { self.updateIcon() } }
         let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
-        if AXIsProcessTrustedWithOptions(opts) {
-            installMonitors()
-        } else {
-            // Wait for the user to grant Accessibility; key monitors are useless (and paste fails) before.
-            Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] t in
-                if AXIsProcessTrusted() { t.invalidate(); self?.installMonitors() }
-            }
+        if AXIsProcessTrustedWithOptions(opts) { installMonitors(); monitorsInstalledAtLaunch = true }
+        // Keep the menu bar "!" in sync with permissions granted or revoked in System Settings.
+        // Key monitors are only installed once Accessibility is granted (useless before).
+        Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            if AXIsProcessTrusted() { self.installMonitors() }
+            self.updateIcon()
         }
+    }
+
+    // MARK: Permissions
+
+    var hasAccessibility: Bool { AXIsProcessTrusted() }
+    var micStatus: AVAuthorizationStatus { AVCaptureDevice.authorizationStatus(for: .audio) }
+    var permissionsMissing: Bool { !hasAccessibility || micStatus != .authorized }
+
+    func openPrivacyPane(_ anchor: String) {
+        NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?\(anchor)")!)
+    }
+
+    @objc func grantAccessibility() {
+        // Adds Kunyu to the list (switched off) and shows the system prompt, then opens the pane.
+        let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+        _ = AXIsProcessTrustedWithOptions(opts)
+        openPrivacyPane("Privacy_Accessibility")
+    }
+
+    @objc func grantMicrophone() {
+        if micStatus == .notDetermined {
+            AVCaptureDevice.requestAccess(for: .audio) { _ in DispatchQueue.main.async { self.updateIcon() } }
+        } else {
+            openPrivacyPane("Privacy_Microphone")
+        }
+    }
+
+    @objc func relaunch() {
+        let path = Bundle.main.bundlePath
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/sh")
+        p.arguments = ["-c", "sleep 0.5; /usr/bin/open \"$0\"", path]
+        try? p.run()
+        NSApp.terminate(nil)
     }
 
     func installMonitors() {
@@ -375,7 +410,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         button.image = markImage(size: 16, solid: state == .transcribing)
         button.image?.accessibilityDescription = appName
         button.contentTintColor = state == .recording ? .systemRed : nil
-        button.alphaValue = monitorsInstalled ? 1 : 0.4
+        let missing = permissionsMissing
+        button.alphaValue = missing ? 0.5 : 1
+        button.title = missing ? "!" : ""
+        button.imagePosition = .imageLeading
+        button.toolTip = missing ? "\(appName) needs permissions: click to grant" : appName
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
@@ -391,6 +430,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
         }
         menu.addItem(withTitle: status, action: nil, keyEquivalent: "")
+        if permissionsMissing {
+            if !hasAccessibility {
+                let it = item("⚠︎ Grant Accessibility…  (hotkey and paste)", #selector(grantAccessibility))
+                it.toolTip = "Opens System Settings. Switch Kunyu on in the list."
+                menu.addItem(it)
+            }
+            if micStatus != .authorized {
+                let it = item("⚠︎ Grant Microphone…", #selector(grantMicrophone))
+                it.toolTip = micStatus == .notDetermined ? "Shows the microphone prompt"
+                    : "Opens System Settings. Switch Kunyu on in the list."
+                menu.addItem(it)
+            }
+        }
+        if hasAccessibility {
+            // Escape hatch: if the hotkey stays dead after granting, a fresh process fixes it.
+            if !monitorsInstalledAtLaunch {
+                menu.addItem(item("Relaunch Kunyu (if right ⌥ doesn't respond)", #selector(relaunch)))
+            }
+        }
         if let lastError {
             let item = menu.addItem(withTitle: "⚠︎ \(lastError.prefix(80))", action: nil, keyEquivalent: "")
             item.toolTip = lastError
