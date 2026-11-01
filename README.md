@@ -15,14 +15,16 @@ Named after 坤 from the Diskun design system; the icon is its six-broken-line m
 ## Setup
 
 ```sh
-# API key (stored in the login keychain)
-security add-generic-password -U -s kunyu-openrouter -a openrouter -w 'sk-or-...'
-./build.sh                      # build, sign, install to ~/Applications, launch
+./build.sh      # build, sign, install to ~/Applications, launch
 ```
 
-On first launch grant **Microphone** and **Accessibility** (needed for the hotkey and for pasting).
-If the hotkey doesn't respond after granting, quit and reopen the app.
-`build.sh` signs with your "Apple Development" identity (override with `IDENTITY=...`) so these grants survive rebuilds.
+Then everything happens in the menu bar. While something is missing, the icon shows **!** and the menu lists what to do:
+
+- **Add OpenRouter API Key…**: paste a key from [openrouter.ai/keys](https://openrouter.ai/keys) (or click *Get a Key…*). It is checked with OpenRouter, then stored in the login keychain (service `kunyu-openrouter`). *Change OpenRouter API Key…* replaces it later.
+- **Grant Accessibility…** (hotkey and paste) and **Grant Microphone…** open the matching System Settings page.
+
+`build.sh` signs with your "Apple Development" identity (override with `IDENTITY=...`) so permissions survive rebuilds.
+For scripts, `OPENROUTER_API_KEY` in the environment overrides the keychain.
 
 ## Settings
 

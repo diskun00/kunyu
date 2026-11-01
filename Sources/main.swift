@@ -33,22 +33,67 @@ struct Transcript {
     let cost: Double?     // USD, as reported by OpenRouter
 }
 
+/// The OpenRouter key lives in the login keychain (generic password, service `kunyu-openrouter`).
+enum Keychain {
+    static let base: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
+                                      kSecAttrService as String: keychainService]
+
+    static func read() -> String? {
+        var q = base
+        q[kSecReturnData as String] = true
+        q[kSecMatchLimit as String] = kSecMatchLimitOne
+        var out: CFTypeRef?
+        guard SecItemCopyMatching(q as CFDictionary, &out) == errSecSuccess, let data = out as? Data,
+              let key = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !key.isEmpty else { return nil }
+        return key
+    }
+
+    /// Existence check that reads attributes only, so it never triggers a keychain prompt.
+    static var exists: Bool {
+        var q = base
+        q[kSecReturnAttributes as String] = true
+        return SecItemCopyMatching(q as CFDictionary, nil) == errSecSuccess
+    }
+
+    static func save(_ key: String) throws {
+        let data = Data(key.utf8)
+        var status = SecItemUpdate(base as CFDictionary, [kSecValueData as String: data] as CFDictionary)
+        if status == errSecItemNotFound {
+            var q = base
+            q[kSecAttrAccount as String] = "openrouter"
+            q[kSecAttrLabel as String] = "Kunyu OpenRouter API key"
+            q[kSecValueData as String] = data
+            status = SecItemAdd(q as CFDictionary, nil)
+        }
+        guard status == errSecSuccess else {
+            throw KunyuError(message: "Keychain error \(status): \(SecCopyErrorMessageString(status, nil) as String? ?? "")")
+        }
+    }
+}
+
 func apiKey() throws -> String {
     if let env = ProcessInfo.processInfo.environment["OPENROUTER_API_KEY"], !env.isEmpty { return env }
-    let p = Process()
-    p.executableURL = URL(fileURLWithPath: "/usr/bin/security")
-    p.arguments = ["find-generic-password", "-s", keychainService, "-w"]
-    let out = Pipe()
-    p.standardOutput = out
-    p.standardError = Pipe()
-    try p.run()
-    p.waitUntilExit()
-    let key = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
-        .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-    guard p.terminationStatus == 0, !key.isEmpty else {
-        throw KunyuError(message: "No API key in Keychain (service \"\(keychainService)\")")
+    guard let key = Keychain.read() else {
+        throw KunyuError(message: "No OpenRouter API key yet. Choose “Set OpenRouter API Key…” in the menu.")
     }
     return key
+}
+
+/// Asks OpenRouter whether a key is valid (GET /key costs nothing). Returns an error message or nil.
+func checkKey(_ key: String) async -> String? {
+    var req = URLRequest(url: URL(string: "https://openrouter.ai/api/v1/key")!, timeoutInterval: 15)
+    req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+    do {
+        let (_, resp) = try await URLSession.shared.data(for: req)
+        switch (resp as? HTTPURLResponse)?.statusCode ?? 0 {
+        case 200: return nil
+        case 401, 403: return "OpenRouter rejected this key. Check that you copied all of it."
+        case let code: return "OpenRouter answered with status \(code). Try again in a moment."
+        }
+    } catch {
+        return "Could not reach OpenRouter: \(error.localizedDescription)"
+    }
 }
 
 func transcribe(_ file: URL) async throws -> Transcript {
@@ -241,7 +286,79 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     var hasAccessibility: Bool { AXIsProcessTrusted() }
     var micStatus: AVAuthorizationStatus { AVCaptureDevice.authorizationStatus(for: .audio) }
-    var permissionsMissing: Bool { !hasAccessibility || micStatus != .authorized }
+    lazy var hasKey = Keychain.exists
+    var permissionsMissing: Bool { !hasAccessibility || micStatus != .authorized || !hasKey }
+
+    @objc func setAPIKey() {
+        NSApp.activate(ignoringOtherApps: true)
+        let field = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 340, height: 24))
+        field.placeholderString = "sk-or-v1-…"
+        var message: String? = nil
+        while true {
+            let alert = NSAlert()
+            alert.messageText = hasKey ? "Replace OpenRouter API Key" : "Add Your OpenRouter API Key"
+            alert.informativeText = (message.map { "⚠︎ \($0)\n\n" } ?? "")
+                + "Kunyu sends your recordings to OpenRouter for transcription. Paste your key from "
+                + "openrouter.ai/keys. It is stored in your macOS Keychain."
+            alert.accessoryView = field
+            alert.addButton(withTitle: "Save")
+            alert.addButton(withTitle: "Cancel")
+            alert.addButton(withTitle: "Get a Key…")
+            alert.window.initialFirstResponder = field
+            switch alert.runModal() {
+            case .alertThirdButtonReturn:
+                NSWorkspace.shared.open(URL(string: "https://openrouter.ai/keys")!)
+                continue
+            case .alertFirstButtonReturn:
+                let key = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !key.isEmpty else { message = "The key is empty."; continue }
+                // Validate before saving so a typo is caught here, not at the first dictation.
+                if let problem = waitForKeyCheck(key) { message = problem; continue }
+                do {
+                    try Keychain.save(key)
+                    hasKey = true
+                    lastError = nil
+                    updateIcon()
+                } catch {
+                    message = error.localizedDescription
+                    continue
+                }
+                return
+            default:
+                return
+            }
+        }
+    }
+
+    final class Box: @unchecked Sendable { var done = false; var result: String? }
+
+    /// Runs `checkKey` while showing a small spinner panel; returns its error message or nil.
+    func waitForKeyCheck(_ key: String) -> String? {
+        let box = Box()
+        Task.detached {
+            let r = await checkKey(key)
+            DispatchQueue.main.async { box.result = r; box.done = true }
+        }
+        let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 250, height: 60),
+                            styleMask: [.titled], backing: .buffered, defer: false)
+        panel.title = appName
+        let spinner = NSProgressIndicator(frame: NSRect(x: 16, y: 20, width: 20, height: 20))
+        spinner.style = .spinning
+        spinner.startAnimation(nil)
+        let label = NSTextField(labelWithString: "Checking key with OpenRouter…")
+        label.frame = NSRect(x: 44, y: 20, width: 200, height: 20)
+        panel.contentView?.addSubview(spinner)
+        panel.contentView?.addSubview(label)
+        panel.center()
+        let session = NSApp.beginModalSession(for: panel)
+        while !box.done {
+            _ = NSApp.runModalSession(session)
+            RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.05))  // drains main queue
+        }
+        NSApp.endModalSession(session)
+        panel.orderOut(nil)
+        return box.result
+    }
 
     func openPrivacyPane(_ anchor: String) {
         NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?\(anchor)")!)
@@ -414,7 +531,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         button.alphaValue = missing ? 0.5 : 1
         button.title = missing ? "!" : ""
         button.imagePosition = .imageLeading
-        button.toolTip = missing ? "\(appName) needs permissions: click to grant" : appName
+        button.toolTip = missing ? "\(appName) needs setup: click to finish" : appName
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
@@ -431,6 +548,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         menu.addItem(withTitle: status, action: nil, keyEquivalent: "")
         if permissionsMissing {
+            if !hasKey {
+                menu.addItem(item("⚠︎ Add OpenRouter API Key…", #selector(setAPIKey)))
+            }
             if !hasAccessibility {
                 let it = item("⚠︎ Grant Accessibility…  (hotkey and paste)", #selector(grantAccessibility))
                 it.toolTip = "Opens System Settings. Switch Kunyu on in the list."
@@ -490,6 +610,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         menu.addItem(.separator())
         menu.addItem(usageMenu())
+        if hasKey { menu.addItem(item("Change OpenRouter API Key…", #selector(setAPIKey))) }
         menu.addItem(choiceMenu("Model", Self.models, current: model, action: #selector(pickModel(_:))))
         menu.addItem(choiceMenu("Language", Self.languages, current: language ?? "", action: #selector(pickLanguage(_:))))
         let login = item("Launch at Login", #selector(toggleLogin))
