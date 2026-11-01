@@ -56,27 +56,38 @@ enum Keychain {
         return SecItemCopyMatching(q as CFDictionary, nil) == errSecSuccess
     }
 
+    /// Always delete + add (never update): an item created by Kunyu itself is owned by Kunyu's
+    /// signing team, so later reads never prompt. Items created by other tools (e.g. the
+    /// `security` CLI) belong to Apple's tools and make macOS ask on every read.
     static func save(_ key: String) throws {
-        let data = Data(key.utf8)
-        var status = SecItemUpdate(base as CFDictionary, [kSecValueData as String: data] as CFDictionary)
-        if status == errSecItemNotFound {
-            var q = base
-            q[kSecAttrAccount as String] = "openrouter"
-            q[kSecAttrLabel as String] = "Kunyu OpenRouter API key"
-            q[kSecValueData as String] = data
-            status = SecItemAdd(q as CFDictionary, nil)
-        }
+        SecItemDelete(base as CFDictionary)
+        var q = base
+        q[kSecAttrAccount as String] = "openrouter"
+        q[kSecAttrLabel as String] = "Kunyu OpenRouter API key"
+        q[kSecValueData as String] = Data(key.utf8)
+        let status = SecItemAdd(q as CFDictionary, nil)
         guard status == errSecSuccess else {
             throw KunyuError(message: "Keychain error \(status): \(SecCopyErrorMessageString(status, nil) as String? ?? "")")
         }
+        KeyCache.set(key)
     }
+}
+
+/// The key is read from the keychain once per launch, not once per dictation.
+enum KeyCache {
+    private static let lock = NSLock()
+    private static var value: String?
+    static func get() -> String? { lock.lock(); defer { lock.unlock() }; return value }
+    static func set(_ v: String?) { lock.lock(); value = v; lock.unlock() }
 }
 
 func apiKey() throws -> String {
     if let env = ProcessInfo.processInfo.environment["OPENROUTER_API_KEY"], !env.isEmpty { return env }
+    if let key = KeyCache.get() { return key }
     guard let key = Keychain.read() else {
-        throw KunyuError(message: "No OpenRouter API key yet. Choose “Set OpenRouter API Key…” in the menu.")
+        throw KunyuError(message: "No OpenRouter API key yet. Choose “Add OpenRouter API Key…” in the menu.")
     }
+    KeyCache.set(key)
     return key
 }
 
@@ -722,6 +733,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 // MARK: - Entry point
 
 let args = CommandLine.arguments
+if args.count == 2, args[1] == "--import-key" {
+    // Store a key read from stdin, as Kunyu, so the app can read it without prompts:
+    //   security find-generic-password -s kunyu-openrouter -w | Kunyu --import-key
+    let key = String(data: FileHandle.standardInput.readDataToEndOfFile(), encoding: .utf8)?
+        .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    guard !key.isEmpty else { FileHandle.standardError.write("error: empty key on stdin\n".data(using: .utf8)!); exit(1) }
+    do { try Keychain.save(key); print("saved"); exit(0) }
+    catch { FileHandle.standardError.write("error: \(error.localizedDescription)\n".data(using: .utf8)!); exit(1) }
+}
 if args.count == 3, args[1] == "--transcribe" {
     // CLI test path: Kunyu --transcribe file.m4a
     Task.detached {
