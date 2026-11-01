@@ -13,8 +13,10 @@ var model: String { UserDefaults.standard.string(forKey: "model") ?? "elevenlabs
 var language: String? { UserDefaults.standard.string(forKey: "language") }  // nil = auto-detect
 
 let dataDir: URL = {
-    let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        .appendingPathComponent(appName, isDirectory: true)
+    // KUNYU_DATA_DIR points the app at another history/recordings folder (demos, tests).
+    let dir = ProcessInfo.processInfo.environment["KUNYU_DATA_DIR"].map { URL(fileURLWithPath: $0, isDirectory: true) }
+        ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent(appName, isDirectory: true)
     try? FileManager.default.createDirectory(at: dir.appendingPathComponent("recordings"),
                                              withIntermediateDirectories: true)
     return dir
@@ -281,6 +283,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusItem.menu = menu
         updateIcon()
 
+        if ProcessInfo.processInfo.environment["KUNYU_DEMO_MENU"] != nil {
+            // README screenshots: open the menu by itself shortly after launch.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { self.statusItem.button?.performClick(nil) }
+        }
         AVCaptureDevice.requestAccess(for: .audio) { _ in DispatchQueue.main.async { self.updateIcon() } }
         let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
         if AXIsProcessTrustedWithOptions(opts) { installMonitors(); monitorsInstalledAtLaunch = true }
@@ -640,11 +646,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             ("All time", .distantPast),
         ]
         let sub = NSMenu()
+        sub.autoenablesItems = false  // informational rows: shown in full contrast, clicking does nothing
         for (label, since) in rows {
             let u = history.usage(since: since)
-            let it = sub.addItem(withTitle: "\(label): \(money(u.cost)) · \(minutes(u.seconds)) · \(u.count)×",
-                                 action: nil, keyEquivalent: "")
-            it.isEnabled = false
+            sub.addItem(withTitle: "\(label): \(money(u.cost)) · \(minutes(u.seconds)) · \(u.count)×",
+                        action: nil, keyEquivalent: "")
         }
         let today = history.usage(since: cal.startOfDay(for: now))
         let parent = NSMenuItem(title: "Usage today: \(money(today.cost))", action: nil, keyEquivalent: "")

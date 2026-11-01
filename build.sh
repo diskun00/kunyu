@@ -24,7 +24,11 @@ fi
 
 rm -rf "$BUILD"
 mkdir -p "$BUILD/Contents/MacOS" "$BUILD/Contents/Resources"
-swiftc -swift-version 5 -O -o "$BUILD/Contents/MacOS/Kunyu" Sources/main.swift
+# Universal binary: Intel + Apple Silicon.
+for arch in x86_64 arm64; do
+  swiftc -swift-version 5 -O -target $arch-apple-macosx13.0 -o build/Kunyu-$arch Sources/main.swift
+done
+lipo -create build/Kunyu-x86_64 build/Kunyu-arm64 -output "$BUILD/Contents/MacOS/Kunyu"
 cp Info.plist "$BUILD/Contents/Info.plist"
 cp Resources/AppIcon.icns "$BUILD/Contents/Resources/"
 codesign --force --sign "$IDENTITY" "$BUILD"
