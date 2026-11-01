@@ -170,10 +170,13 @@ struct Entry: Codable {
     var cost: Double?
 }
 
-/// Every successful transcription, newest first. Usage totals are computed from it,
-/// so history is capped generously (a year of heavy use is a few MB).
+/// How many transcripts to keep (`defaults write me.diskun.kunyu historyLimit N`, 0 = unlimited).
+var historyLimit: Int {
+    UserDefaults.standard.object(forKey: "historyLimit") == nil ? 30 : UserDefaults.standard.integer(forKey: "historyLimit")
+}
+
+/// Recent transcripts, newest first, trimmed to `historyLimit`.
 final class History {
-    static let maxEntries = 20_000
     let file = dataDir.appendingPathComponent("history.json")
     private(set) var entries: [Entry] = []
 
@@ -181,14 +184,54 @@ final class History {
 
     func add(_ e: Entry) {
         entries.insert(e, at: 0)
-        if entries.count > Self.maxEntries { entries.removeLast(entries.count - Self.maxEntries) }
-        saveJSON(entries, file)
+        trim()
     }
 
-    /// (cost, seconds, count) for entries on or after `since`.
-    func usage(since: Date = .distantPast) -> (cost: Double, seconds: Double, count: Int) {
-        entries.filter { $0.date >= since }.reduce((0, 0, 0)) {
-            ($0.0 + ($1.cost ?? 0), $0.1 + ($1.seconds ?? 0), $0.2 + 1)
+    func trim() {
+        let limit = historyLimit
+        if limit > 0, entries.count > limit { entries.removeLast(entries.count - limit) }
+        saveJSON(entries, file)
+    }
+}
+
+/// Usage per day ("yyyy-MM-dd" → totals), kept apart from the history so that
+/// trimming transcripts never loses cost figures. Holds no text.
+final class Usage {
+    struct Day: Codable { var cost = 0.0; var seconds = 0.0; var count = 0 }
+    let file = dataDir.appendingPathComponent("usage.json")
+    private(set) var days: [String: Day] = [:]
+    static let fmt: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyy-MM-dd"
+        return f
+    }()
+
+    init(seedFrom history: [Entry]) {
+        if let saved = loadJSON([String: Day].self, file) {
+            days = saved
+        } else {
+            // First run with a usage file: start from whatever the history still holds.
+            for e in history { record(date: e.date, cost: e.cost, seconds: e.seconds, save: false) }
+            saveJSON(days, file)
+        }
+    }
+
+    func record(date: Date = Date(), cost: Double?, seconds: Double?, save: Bool = true) {
+        let key = Self.fmt.string(from: date)
+        var d = days[key] ?? Day()
+        d.cost += cost ?? 0
+        d.seconds += seconds ?? 0
+        d.count += 1
+        days[key] = d
+        if save { saveJSON(days, file) }
+    }
+
+    /// Totals for days on or after the day containing `since`.
+    func total(since: Date = .distantPast) -> Day {
+        let from = since == .distantPast ? "" : Self.fmt.string(from: since)
+        return days.filter { $0.key >= from }.values.reduce(into: Day()) {
+            $0.cost += $1.cost; $0.seconds += $1.seconds; $0.count += $1.count
         }
     }
 }
@@ -264,6 +307,8 @@ enum State { case idle, recording, transcribing }
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     let history = History()
+    // Seeded from the untrimmed history file at launch, before any trim can drop entries.
+    let usage = Usage(seedFrom: History().entries)
     let recordings = Recordings()
     var recorder: AVAudioRecorder?
     var state = State.idle { didSet { updateIcon() } }
@@ -511,6 +556,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         recordings.setError(rec.file, nil)
         guard !t.text.isEmpty else { NSSound.beep(); return }
         history.add(Entry(date: Date(), text: t.text, model: model, seconds: t.seconds ?? rec.duration, cost: t.cost))
+        usage.record(cost: t.cost, seconds: t.seconds ?? rec.duration)
         copy(t.text)
         // Small delay so the just-released Option key can't leak into the paste.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { self.pasteIntoFrontApp() }
@@ -598,17 +644,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let header = menu.addItem(withTitle: history.entries.isEmpty ? "No history yet" : "History (click to copy)",
                                   action: nil, keyEquivalent: "")
         header.isEnabled = false
-        let fmt = DateFormatter()
-        fmt.dateFormat = "HH:mm"
-        for (i, entry) in history.entries.prefix(15).enumerated() {
-            let oneLine = entry.text.replacingOccurrences(of: "\n", with: " ")
-            let title = "\(fmt.string(from: entry.date))  " + (oneLine.count > 60 ? oneLine.prefix(60) + "…" : oneLine)
-            let it = item(title, #selector(copyHistory(_:)))
-            it.tag = i
-            it.toolTip = entry.text
-            menu.addItem(it)
+        // Latest 5 inline; the rest (up to the retention limit) in a submenu.
+        let entries = history.entries
+        for i in entries.indices.prefix(5) { menu.addItem(historyItem(i)) }
+        if entries.count > 5 {
+            let sub = NSMenu()
+            for i in entries.indices.dropFirst(5) { sub.addItem(historyItem(i)) }
+            let parent = NSMenuItem(title: "More History (\(entries.count - 5))", action: nil, keyEquivalent: "")
+            parent.submenu = sub
+            menu.addItem(parent)
         }
-        if !history.entries.isEmpty { menu.addItem(item("Open Full History…", #selector(openHistory))) }
 
         if !recordings.items.isEmpty {
             let sub = NSMenu()
@@ -630,6 +675,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if hasKey { menu.addItem(item("Change OpenRouter API Key…", #selector(setAPIKey))) }
         menu.addItem(choiceMenu("Model", Self.models, current: model, action: #selector(pickModel(_:))))
         menu.addItem(choiceMenu("Language", Self.languages, current: language ?? "", action: #selector(pickLanguage(_:))))
+        menu.addItem(choiceMenu("Keep History", Self.historyLimits, current: String(historyLimit),
+                                action: #selector(pickHistoryLimit(_:))))
         let login = item("Launch at Login", #selector(toggleLogin))
         login.state = SMAppService.mainApp.status == .enabled ? .on : .off
         menu.addItem(login)
@@ -641,18 +688,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let now = Date()
         let rows: [(String, Date)] = [
             ("Today", cal.startOfDay(for: now)),
-            ("Last 7 days", cal.date(byAdding: .day, value: -7, to: now)!),
+            ("Last 7 days", cal.date(byAdding: .day, value: -6, to: now)!),
             ("This month", cal.dateInterval(of: .month, for: now)!.start),
             ("All time", .distantPast),
         ]
         let sub = NSMenu()
         sub.autoenablesItems = false  // informational rows: shown in full contrast, clicking does nothing
         for (label, since) in rows {
-            let u = history.usage(since: since)
+            let u = usage.total(since: since)
             sub.addItem(withTitle: "\(label): \(money(u.cost)) · \(minutes(u.seconds)) · \(u.count)×",
                         action: nil, keyEquivalent: "")
         }
-        let today = history.usage(since: cal.startOfDay(for: now))
+        let today = usage.total(since: now)
         let parent = NSMenuItem(title: "Usage today: \(money(today.cost))", action: nil, keyEquivalent: "")
         parent.submenu = sub
         return parent
@@ -717,7 +764,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         copy(history.entries[sender.tag].text)
     }
 
-    @objc func openHistory() { NSWorkspace.shared.open(history.file) }
+    func historyItem(_ i: Int) -> NSMenuItem {
+        let entry = history.entries[i]
+        let fmt = DateFormatter()
+        fmt.dateFormat = Calendar.current.isDateInToday(entry.date) ? "HH:mm" : "MMM d"
+        let oneLine = entry.text.replacingOccurrences(of: "\n", with: " ")
+        let title = "\(fmt.string(from: entry.date))  " + (oneLine.count > 60 ? oneLine.prefix(60) + "…" : oneLine)
+        let it = item(title, #selector(copyHistory(_:)))
+        it.tag = i
+        it.toolTip = entry.text
+        return it
+    }
+
+    static let historyLimits: [(id: String, label: String)] = [
+        ("10", "Last 10"), ("30", "Last 30"), ("100", "Last 100"), ("1000", "Last 1,000"), ("0", "Everything"),
+    ]
+
+    @objc func pickHistoryLimit(_ sender: NSMenuItem) {
+        guard let n = Int(sender.representedObject as? String ?? "") else { return }
+        UserDefaults.standard.set(n, forKey: "historyLimit")
+        history.trim()  // shrinking the limit deletes older transcripts right away
+    }
 
     @objc func retry(_ sender: NSMenuItem) {
         guard state == .idle, let file = sender.representedObject as? String,
