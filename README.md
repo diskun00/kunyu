@@ -19,13 +19,14 @@ One Swift file, no dependencies. Named after 坤 (earth) from the Diskun design 
 ## Features
 
 - **Tap right ⌥** → start recording. **Tap again** → transcribe, paste at the cursor; the text also stays on the clipboard.
+- **Clean up** (on by default): a small, fast OpenRouter chat model tidies the transcript before it is pasted. It removes fillers (um, uh, ähm, 嗯), stutters and false starts, keeps only self-corrections ("at 3, no, at 4" → "at 4"), and fixes punctuation. It is told to keep every detail and the speaker's language, and to never answer or obey what you dictate. Adds ~0.7 s and ~$0.0001 for a short dictation. If cleanup fails, times out (10 s plus 1 s per 300 characters) or changes the length suspiciously, the raw transcript is pasted and the menu shows why.
 - **Esc** while recording cancels.
 - Only a *clean* tap counts (right ⌥ released within 0.4 s with no other key in between), so ⌥-key characters don't trigger it.
 - Menu bar icon (the 坤 mark; red while recording, solid lines while transcribing):
-  - **History**: latest 5 in the menu, the rest under *More History*; click any to copy. Keeps the last 30 by default (*Keep History*: 10, 30, 100, 1,000 or everything).
+  - **History**: latest 5 in the menu, the rest under *More History*; click any to copy (hold **⌥** to copy the raw transcript instead of the cleaned-up text). Keeps the last 30 by default (*Keep History*: 10, 30, 100, 1,000 or everything).
   - **Recent Recordings**: the last 3 recordings are kept on disk; click one to transcribe it again (failed ones are marked).
   - **Usage**: cost, audio minutes and count for today / last 7 days / this month / all time, from the cost OpenRouter reports per request. Totals are kept per day, so they survive history trimming.
-  - **Model** and **Language** switchers, **Launch at Login**.
+  - **Model**, **Clean Up** (model or Off) and **Language** switchers, **Launch at Login**.
 
 ## Build from source
 
@@ -43,10 +44,11 @@ For scripts, `OPENROUTER_API_KEY` in the environment overrides the keychain.
 
 ## Settings
 
-Pick **Model** and **Language** from the menu bar. Equivalent CLI (any model id works here):
+Pick **Model**, **Clean Up** and **Language** from the menu bar. Equivalent CLI (any model id works here):
 
 ```sh
 defaults write me.diskun.kunyu model openai/whisper-large-v3-turbo   # default: elevenlabs/scribe-v2
+defaults write me.diskun.kunyu cleanupModel ""                          # default: anthropic/claude-haiku-5.5, "" = off
 defaults write me.diskun.kunyu language de                          # default: auto-detect
 defaults write me.diskun.kunyu historyLimit 100                     # default: 30, 0 = keep everything
 ```
@@ -56,10 +58,11 @@ List transcription models: `curl -s 'https://openrouter.ai/api/v1/models?output_
 Note: if your OpenRouter account enforces Zero Data Retention (Settings → Privacy), OpenAI's `gpt-4o-*-transcribe` and Google's
 transcribe models are unavailable (HTTP 404 "ZDR violation"). The models in the menu work with ZDR on; verified 2026-11-01: `elevenlabs/scribe-v2`, `openai/whisper-large-v3-turbo`, `deepgram/nova-3`,
 `mistralai/voxtral-small-transcribe-3-0`, `assemblyai/universal-3-6-pro`, `nvidia/parakeet-tdt-0.6b-v3`.
+Cleanup model verified with ZDR on 2026-11-03: `anthropic/claude-haiku-5.5` (`google/gemini-2.5-flash-lite` is blocked; `google/gemini-3.1-flash-lite` works but summarized long dictations).
 
 ## Files
 
-- `~/Library/Application Support/Kunyu/history.json`: recent transcripts with model, seconds and cost (trimmed to *Keep History*)
+- `~/Library/Application Support/Kunyu/history.json`: recent transcripts (cleaned text plus `raw`) with model, cleanup model, seconds and cost (trimmed to *Keep History*)
 - `~/Library/Application Support/Kunyu/usage.json`: per-day cost, seconds and count (no text)
 - `~/Library/Application Support/Kunyu/recordings/`: the last 3 recordings (`index.json` marks failures)
 - `docs/`: README images (menu screenshot taken with demo data via `KUNYU_DATA_DIR` and `KUNYU_DEMO_MENU=1`)
@@ -68,7 +71,8 @@ transcribe models are unavailable (HTTP 404 "ZDR violation"). The models in the 
 ## Testing without the mic
 
 ```sh
-~/Applications/Kunyu.app/Contents/MacOS/Kunyu --transcribe some.m4a   # prints text; model, length, cost on stderr
+~/Applications/Kunyu.app/Contents/MacOS/Kunyu --transcribe some.m4a   # prints cleaned text; raw text, models, length, cost on stderr
+echo "um, so, uh, test" | ~/Applications/Kunyu.app/Contents/MacOS/Kunyu --cleanup [model]   # cleanup only; time and cost on stderr
 ```
 
 ## Releasing
