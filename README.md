@@ -77,6 +77,12 @@ echo "um, so, uh, test" | ~/Applications/Kunyu.app/Contents/MacOS/Kunyu --cleanu
 
 ## Releasing
 
-```sh
-./release.sh    # builds, zips Kunyu.app and creates GitHub release v<CFBundleShortVersionString>
-```
+Bump `CFBundleShortVersionString` (and `CFBundleVersion`) in `Info.plist` and merge to `main`. The
+[Release workflow](.github/workflows/release.yml) builds on a macOS runner and publishes `v<version>` with
+`Kunyu.zip`, unless that release already exists (it can also be started by hand from the Actions tab).
+
+CI signs with the "Apple Development" certificate from the `MACOS_CERT_P12` (base64 `.p12`) and
+`MACOS_CERT_PASSWORD` repo secrets, so updates keep their Accessibility and Microphone grants. Without the
+secrets it signs ad hoc, and users have to grant both again after each update.
+
+Locally, `./release.sh` does the same build and upload by hand.
